@@ -7,3 +7,5 @@ dist/
 *.tsbuildinfo
 .DS_Store
 node_modules
+.chatgpt-plan.json
+.chatgpt-plan-host.json
