@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import {
   CHATGPT_PLAN_REQUIRED_SCOPE,
   buildRefreshTokenBody,
   chooseChatGPTPlanModel,
+  getChatGPTPlanAuthorization,
   parseChatGPTPlanAuth,
 } from '../../lib/ai/chatgpt-plan';
 
@@ -53,4 +57,51 @@ const invalidScope = parseChatGPTPlanAuth(JSON.stringify({
 }));
 assert.equal(invalidScope.ok, false);
 
-console.log('[chatgpt-plan] auth parsing, refresh contract and model selection passed');
+const tempDir = await mkdtemp(path.join(os.tmpdir(), 'ziwei-chatgpt-plan-'));
+const authPath = path.join(tempDir, '.chatgpt-plan.json');
+await writeFile(authPath, JSON.stringify({
+  host_id: 'urn:uuid:22222222-2222-4222-8222-222222222222',
+  client_id: 'oaiapp_concurrency_test',
+  access_token: 'expired-access',
+  refresh_token: 'refresh-old',
+  id_token: 'id-old',
+  scope: CHATGPT_PLAN_REQUIRED_SCOPE,
+  expires_at: Date.now() - 1,
+  model: 'gpt-6.1-terra',
+}));
+
+const originalFetch = globalThis.fetch;
+let refreshCalls = 0;
+globalThis.fetch = async () => {
+  refreshCalls += 1;
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  return new Response(JSON.stringify({
+    access_token: 'access-new',
+    refresh_token: 'refresh-new',
+    id_token: 'id-new',
+    scope: CHATGPT_PLAN_REQUIRED_SCOPE,
+    expires_in: 3600,
+  }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+};
+
+try {
+  const [first, second] = await Promise.all([
+    getChatGPTPlanAuthorization(authPath),
+    getChatGPTPlanAuthorization(authPath),
+  ]);
+  assert.equal(refreshCalls, 1, 'concurrent callers must share one rotating-token refresh');
+  assert.equal(first?.accessToken, 'access-new');
+  assert.equal(second?.accessToken, 'access-new');
+
+  const saved = JSON.parse(await readFile(authPath, 'utf8')) as Record<string, unknown>;
+  assert.equal(saved.refresh_token, 'refresh-new');
+  assert.equal(saved.access_token, 'access-new');
+} finally {
+  globalThis.fetch = originalFetch;
+  await rm(tempDir, { recursive: true, force: true });
+}
+
+console.log('[chatgpt-plan] auth parsing, model selection and serialized refresh passed');
