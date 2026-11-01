@@ -8,6 +8,7 @@ export const CHATGPT_PLAN_AUTH_FILENAME = '.chatgpt-plan.json';
 
 const TOKEN_ENDPOINT = 'https://auth.openai.com/api/accounts/oauth/token';
 const REFRESH_EARLY_MS = 5 * 60 * 1000;
+const refreshLocks = new Map<string, Promise<ChatGPTPlanAuth>>();
 
 export type ChatGPTPlanModel = {
   slug: string;
@@ -185,6 +186,30 @@ async function refreshAuth(authPath: string, auth: ChatGPTPlanAuth): Promise<Cha
   return updated;
 }
 
+async function refreshAuthSerialized(authPath: string): Promise<ChatGPTPlanAuth> {
+  const existing = refreshLocks.get(authPath);
+  if (existing) return existing;
+
+  const task = (async () => {
+    const raw = await readFile(authPath, 'utf8');
+    const parsed = parseChatGPTPlanAuth(raw);
+    if (!parsed.ok) throw new Error(parsed.message);
+
+    // Another request may have refreshed and persisted the file before this lock was acquired.
+    if (parsed.value.expiresAt > Date.now() + REFRESH_EARLY_MS) {
+      return parsed.value;
+    }
+    return refreshAuth(authPath, parsed.value);
+  })();
+
+  refreshLocks.set(authPath, task);
+  try {
+    return await task;
+  } finally {
+    if (refreshLocks.get(authPath) === task) refreshLocks.delete(authPath);
+  }
+}
+
 export async function getChatGPTPlanAuthorization(
   authPath = resolveChatGPTPlanAuthPath(),
 ): Promise<ChatGPTPlanAuthorization | null> {
@@ -202,7 +227,7 @@ export async function getChatGPTPlanAuthorization(
 
   let auth = parsed.value;
   if (auth.expiresAt <= Date.now() + REFRESH_EARLY_MS) {
-    auth = await refreshAuth(authPath, auth);
+    auth = await refreshAuthSerialized(authPath);
   }
 
   return {
